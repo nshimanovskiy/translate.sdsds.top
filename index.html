@@ -147,8 +147,10 @@ footer a{color:inherit}
 html.js #nojs{display:none}
 /* Скрипты сайта работают, но translate.googleapis.com заблокирован → снова показываем плашку */
 html.js.api-blocked #nojs{display:flex}
-#nojs .retry{margin-top:16px;width:100%}
-html:not(.js) #nojs .retry{display:none}
+#nojs .btns{margin-top:16px}
+html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:none}
+#nojs .reason{color:var(--ink)}
+#nojs .tech{font-size:12px;margin:0;word-break:break-word}
 #nojs .card{max-width:480px}
 #nojs h2{font-size:24px;letter-spacing:-.02em;margin:0 0 10px;font-weight:800}
 #nojs p{margin:0 0 12px;color:var(--muted)}
@@ -171,10 +173,21 @@ html:not(.js) #nojs .retry{display:none}
 
 <div id="nojs" role="alert">
   <div class="card">
-    <h2>Нужен JavaScript</h2>
-    <p>Переводчик не работает без JavaScript. Разрешите скрипты для <code>sdsds.top</code> и <code>translate.googleapis.com</code> (например, в NoScript или uBlock Origin) и обновите страницу.</p>
-    <p class="en">JavaScript is required. Please allow scripts from sdsds.top and translate.googleapis.com and reload the page.</p>
-    <button class="btn primary retry" id="retry" type="button">Проверить снова</button>
+    <div class="msg-nojs">
+      <h2>Нужен JavaScript</h2>
+      <p>Переводчик не работает без JavaScript. Разрешите скрипты для <code>sdsds.top</code> и <code>translate.googleapis.com</code> (например, в NoScript или uBlock Origin) и обновите страницу.</p>
+      <p>Если всё уже разрешено — обновите страницу без кэша: <code>Ctrl</code> + <code>F5</code>.</p>
+      <p class="en">JavaScript is required. Please allow scripts from sdsds.top and translate.googleapis.com and reload the page.</p>
+    </div>
+    <div class="msg-api">
+      <h2>Нет доступа к переводчику</h2>
+      <p class="reason" id="apiReason"></p>
+      <p class="tech mono" id="apiTech"></p>
+      <div class="btns">
+        <button class="btn primary" id="retry" type="button">Проверить снова</button>
+        <button class="btn" id="skipCheck" type="button">Всё равно открыть</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -622,26 +635,68 @@ html:not(.js) #nojs .retry{display:none}
   $('speakOut').onclick = e => speak(lastResult, tl.value, e.currentTarget);
 
   // ---------- Проверка доступа к translate.googleapis.com ----------
-  // Если запрос блокирует расширение (NoScript, uBlock и т. п.), показываем плашку с просьбой разрешить домен
-  async function checkApi() {
+  // Если запросы к API блокируются (расширение браузера или заголовок CSP сервера),
+  // показываем плашку и пишем, что именно мешает.
+  const API_PROBE = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=en&tl=ru&q=ok';
+  let cspBlocked = '', skipped = false;
+  document.addEventListener('securitypolicyviolation', e => {
+    if (/googleapis|google\.com|mymemory/.test(e.blockedURI || '')) cspBlocked = e.violatedDirective || e.effectiveDirective || 'connect-src';
+  });
+
+  // Заголовок CSP самой страницы: если в нём не разрешён translate.googleapis.com, виноват сервер
+  async function serverCsp() {
     try {
-      const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=en&tl=ru&q=ok', { cache: 'no-store' });
+      const r = await fetch(location.pathname, { method: 'HEAD', cache: 'no-store' });
+      const csp = r.headers.get('content-security-policy') || '';
+      if (!csp) return '';
+      const dirs = Object.fromEntries(csp.split(';').map(d => d.trim().split(/\s+/)).filter(d => d[0]).map(d => [d[0].toLowerCase(), d.slice(1)]));
+      const list = dirs['connect-src'] || dirs['default-src'];
+      if (!list) return '';
+      const ok = list.some(v => v === '*' || v === 'https:' || /^(https:\/\/)?(\*\.googleapis\.com|translate\.googleapis\.com)$/.test(v));
+      return ok ? '' : (dirs['connect-src'] ? 'connect-src' : 'default-src') + ' ' + list.join(' ');
+    } catch { return ''; }
+  }
+
+  async function checkApi() {
+    if (skipped) return true;
+    let err;
+    try {
+      await fetch(API_PROBE, { cache: 'no-store' });
       // Любой ответ сервера значит, что домен не заблокирован
       document.documentElement.classList.remove('api-blocked');
       return true;
-    } catch {
-      if (navigator.onLine === false) { toast('Нет подключения к интернету'); return false; }
-      document.documentElement.classList.add('api-blocked');
-      return false;
+    } catch (e) { err = e; }
+    if (navigator.onLine === false) { toast('Нет подключения к интернету'); return false; }
+    await new Promise(r => setTimeout(r, 50)); // даём дойти событию securitypolicyviolation
+    const csp = await serverCsp() || cspBlocked;
+    if (csp) {
+      $('apiReason').innerHTML = 'Запросы к <code>translate.googleapis.com</code> запрещает сам сервер — заголовок '
+        + '<code>Content-Security-Policy</code>. Администратору нужно добавить в <code>connect-src</code> адреса '
+        + '<code>https://translate.googleapis.com https://api.mymemory.translated.net</code>, '
+        + 'а в <code>media-src</code> — <code>https://translate.google.com</code>.';
+      $('apiTech').textContent = 'Сейчас: ' + csp;
+    } else {
+      $('apiReason').innerHTML = 'Браузер или расширение блокирует запросы к <code>translate.googleapis.com</code>. '
+        + 'Разрешите этот домен (в NoScript — <code>googleapis.com</code>), проверьте uBlock Origin и блокировщики рекламы '
+        + 'и нажмите «Проверить снова».';
+      $('apiTech').textContent = err && err.message ? 'Ошибка: ' + err.message : '';
     }
+    document.documentElement.classList.add('api-blocked');
+    return false;
   }
   $('retry').onclick = async e => {
     const b = e.currentTarget;
     b.disabled = true;
+    cspBlocked = '';
     const ok = await checkApi();
     b.disabled = false;
     if (ok) { toast('Доступ есть'); if (src.value.trim()) translate(false); }
     else toast('translate.googleapis.com всё ещё недоступен');
+  };
+  $('skipCheck').onclick = () => {
+    skipped = true;
+    document.documentElement.classList.remove('api-blocked');
+    toast('Перевод пойдёт через запасной сервис, если он доступен');
   };
 
   // ---------- История ----------
