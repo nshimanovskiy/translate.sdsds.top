@@ -10,6 +10,7 @@
 <meta property="og:title" content="Переводчик онлайн — translate.sdsds.top">
 <meta property="og:description" content="Быстрый бесплатный перевод текста на 100+ языков.">
 <meta property="og:url" content="https://translate.sdsds.top/">
+<meta name="referrer" content="no-referrer">
 <link rel="canonical" href="https://translate.sdsds.top/">
 <!-- Тема из прошлого визита применяется до отрисовки, чтобы не мигало -->
 <script>
@@ -144,6 +145,10 @@ footer a{color:inherit}
 /* Плашка «нужен JavaScript»: видна по умолчанию, прячется, когда скрипты разрешены */
 #nojs{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px;background:var(--bg)}
 html.js #nojs{display:none}
+/* Скрипты сайта работают, но translate.googleapis.com заблокирован → снова показываем плашку */
+html.js.api-blocked #nojs{display:flex}
+#nojs .retry{margin-top:16px;width:100%}
+html:not(.js) #nojs .retry{display:none}
 #nojs .card{max-width:480px}
 #nojs h2{font-size:24px;letter-spacing:-.02em;margin:0 0 10px;font-weight:800}
 #nojs p{margin:0 0 12px;color:var(--muted)}
@@ -168,7 +173,8 @@ html.js #nojs{display:none}
   <div class="card">
     <h2>Нужен JavaScript</h2>
     <p>Переводчик не работает без JavaScript. Разрешите скрипты для <code>sdsds.top</code> и <code>translate.googleapis.com</code> (например, в NoScript или uBlock Origin) и обновите страницу.</p>
-    <p class="en">JavaScript is required. Please allow scripts from sdsds.top and reload the page.</p>
+    <p class="en">JavaScript is required. Please allow scripts from sdsds.top and translate.googleapis.com and reload the page.</p>
+    <button class="btn primary retry" id="retry" type="button">Проверить снова</button>
   </div>
 </div>
 
@@ -445,6 +451,7 @@ html.js #nojs{display:none}
     } catch (e) {
       if (e.name === 'AbortError' || id !== reqId) return;
       detected.textContent = '';
+      if (e instanceof TypeError) checkApi();
       showOut('Не удалось перевести: ' + (e.message || 'ошибка сети') + '. Попробуйте ещё раз.', true);
     } finally {
       if (id === reqId) go.disabled = false;
@@ -543,18 +550,99 @@ html.js #nojs{display:none}
   };
 
   // ---------- Озвучка ----------
-  function speak(text, lang, btn) {
-    if (!('speechSynthesis' in window)) { toast('Озвучка не поддерживается браузером'); return; }
-    if (speechSynthesis.speaking) { speechSynthesis.cancel(); return; }
-    if (!text.trim()) return;
-    const u = new SpeechSynthesisUtterance(text.slice(0, 3000));
-    if (lang && lang !== 'auto') u.lang = TTS[lang] || lang;
-    btn.classList.add('on');
-    u.onend = u.onerror = () => btn.classList.remove('on');
-    speechSynthesis.speak(u);
+  // Основной способ — голос Google (аудио с translate.google.com), запасной — голоса браузера.
+  // Google озвучивает до ~200 символов за раз, поэтому текст читается частями подряд.
+  let ttsId = 0, ttsBtn = null, ttsAudio = null;
+  const utterances = []; // держим ссылки, иначе Chrome может собрать их сборщиком мусора и оборвать речь
+
+  function stopSpeak() {
+    ttsId++;
+    if (ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
+    try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch {}
+    utterances.length = 0;
+    if (ttsBtn) { ttsBtn.classList.remove('on'); ttsBtn.textContent = 'Озвучить'; }
+    ttsBtn = null;
   }
+
+  function speak(text, lang, btn) {
+    const same = ttsBtn === btn;
+    stopSpeak();
+    if (same) return; // повторное нажатие — остановить
+    text = text.trim().slice(0, 3000);
+    if (!text) { toast('Нечего озвучивать'); return; }
+    if (!lang || lang === 'auto') { toast('Сначала переведите текст, чтобы определить язык'); return; }
+    ttsBtn = btn;
+    btn.classList.add('on');
+    btn.textContent = 'Стоп';
+    playGoogle(chunks(text, 190), lang, ++ttsId);
+  }
+
+  function playGoogle(parts, lang, id) {
+    if (id !== ttsId) return;
+    if (!parts.length) { stopSpeak(); return; }
+    const audio = new Audio('https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl='
+      + encodeURIComponent(lang) + '&q=' + encodeURIComponent(parts[0]));
+    ttsAudio = audio;
+    let failed = false;
+    const fail = () => {
+      if (failed || id !== ttsId) return;
+      failed = true;
+      ttsAudio = null;
+      speakBrowser(parts.join(' '), lang, id);
+    };
+    audio.onended = () => playGoogle(parts.slice(1), lang, id);
+    audio.onerror = fail;
+    audio.play().catch(e => { if (e.name !== 'AbortError') fail(); });
+  }
+
+  function speakBrowser(text, lang, id) {
+    if (!('speechSynthesis' in window)) { toast('Озвучка не поддерживается браузером'); stopSpeak(); return; }
+    const code = (TTS[lang] || lang).toLowerCase();
+    const voices = speechSynthesis.getVoices();
+    const norm = v => v.lang.toLowerCase().replace('_', '-');
+    const voice = voices.find(v => norm(v) === code) || voices.find(v => norm(v).split('-')[0] === code.split('-')[0]);
+    if (voices.length && !voice) { toast('В браузере нет голоса для языка «' + (LANGS[lang] || lang) + '»'); stopSpeak(); return; }
+    const parts = chunks(text, 200);
+    parts.forEach((p, i) => {
+      const u = new SpeechSynthesisUtterance(p);
+      u.lang = TTS[lang] || lang;
+      if (voice) u.voice = voice;
+      if (i === parts.length - 1) u.onend = () => { if (id === ttsId) stopSpeak(); };
+      u.onerror = e => {
+        if (id !== ttsId || e.error === 'interrupted' || e.error === 'canceled') return;
+        toast('Не удалось озвучить текст'); stopSpeak();
+      };
+      utterances.push(u);
+      speechSynthesis.speak(u);
+    });
+  }
+  if ('speechSynthesis' in window) speechSynthesis.getVoices(); // заранее подгружаем список голосов
+
   $('speakSrc').onclick = e => speak(src.value, sl.value === 'auto' ? lastDetected : sl.value, e.currentTarget);
   $('speakOut').onclick = e => speak(lastResult, tl.value, e.currentTarget);
+
+  // ---------- Проверка доступа к translate.googleapis.com ----------
+  // Если запрос блокирует расширение (NoScript, uBlock и т. п.), показываем плашку с просьбой разрешить домен
+  async function checkApi() {
+    try {
+      const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=en&tl=ru&q=ok', { cache: 'no-store' });
+      // Любой ответ сервера значит, что домен не заблокирован
+      document.documentElement.classList.remove('api-blocked');
+      return true;
+    } catch {
+      if (navigator.onLine === false) { toast('Нет подключения к интернету'); return false; }
+      document.documentElement.classList.add('api-blocked');
+      return false;
+    }
+  }
+  $('retry').onclick = async e => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    const ok = await checkApi();
+    b.disabled = false;
+    if (ok) { toast('Доступ есть'); if (src.value.trim()) translate(false); }
+    else toast('translate.googleapis.com всё ещё недоступен');
+  };
 
   // ---------- История ----------
   const HMAX = 20;
@@ -604,6 +692,7 @@ html.js #nojs{display:none}
   }
 
   // ---------- Старт ----------
+  checkApi();
   updateCount();
   renderHistory();
   if (src.value.trim()) translate(false);
