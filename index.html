@@ -102,7 +102,7 @@ select:hover{border-color:var(--ink)}
 .output.has{border-style:solid;background:var(--field)}
 .output.error{color:var(--danger);border-color:var(--danger);font-family:inherit;font-size:14px}
 .dict{font-size:13px;color:var(--muted)}
-#engineNote{white-space:nowrap}
+#engineNote{text-align:right}
 
 .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .btn{border:1.5px solid var(--line);background:var(--field);color:var(--ink);font-family:inherit;font-size:14px;font-weight:600;line-height:1.2;padding:12px 14px;border-radius:10px;cursor:pointer;
@@ -447,34 +447,66 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
   // короткоживущий токен с edge.microsoft.com и запрос к api-edge.cognitive.microsofttranslator.com
   const MS_CODE = { iw:'he', 'zh-CN':'zh-Hans', 'zh-TW':'zh-Hant', no:'nb', hmn:'mww', sr:'sr-Cyrl', jw:'jv', ny:'nya', st:'st' };
   const MS_BACK = { he:'iw', 'zh-Hans':'zh-CN', 'zh-Hant':'zh-TW', zh:'zh-CN', nb:'no', mww:'hmn', 'sr-Cyrl':'sr', 'sr-Latn':'sr', jv:'jw', nya:'ny', tl:'fil' };
-  let msToken = null, msTokenAt = 0;
-  async function msAuth(signal, force) {
-    if (!force && msToken && Date.now() - msTokenAt < 8 * 60 * 1000) return msToken;
-    const r = await fetch('https://edge.microsoft.com/translate/auth', { signal });
-    if (!r.ok) throw new Error('Microsoft: HTTP ' + r.status);
-    msToken = (await r.text()).trim();
-    msTokenAt = Date.now();
-    return msToken;
+  // Два пути: напрямую к Microsoft или через прокси на этом же домене (/ms/…, см. README) —
+  // прямой запрос браузер может не пустить из-за CORS. Рабочий путь запоминается.
+  const MS_ROUTES = {
+    direct: { auth: 'https://edge.microsoft.com/translate/auth', api: 'https://api-edge.cognitive.microsofttranslator.com/translate' },
+    proxy: { auth: '/ms/auth', api: '/ms/translate' }
+  };
+  let msRoute = null, msToken = null, msTokenAt = 0, msError = '';
+
+  async function msAuth(route, signal, force) {
+    if (!force && msToken && msRoute === route && Date.now() - msTokenAt < 8 * 60 * 1000) return msToken;
+    const r = await fetch(MS_ROUTES[route].auth, { signal, cache: 'no-store' });
+    if (!r.ok) throw new Error('токен: HTTP ' + r.status);
+    const t = (await r.text()).trim();
+    if (!/^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(t)) throw new Error('токен: неверный ответ'); // например, прокси не настроен
+    msToken = t; msTokenAt = Date.now();
+    return t;
   }
-  async function microsoft(text, from, to, signal, retry = true) {
-    const token = await msAuth(signal, !retry);
-    let url = 'https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=' + encodeURIComponent(MS_CODE[to] || to);
+
+  async function msTranslate(route, text, from, to, signal) {
+    let token = await msAuth(route, signal, false);
+    let url = MS_ROUTES[route].api + '?api-version=3.0&to=' + encodeURIComponent(MS_CODE[to] || to);
     if (from !== 'auto') url += '&from=' + encodeURIComponent(MS_CODE[from] || from);
-    const r = await fetch(url, {
+    const send = () => fetch(url, {
       method: 'POST', signal,
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify([{ Text: text }])
     });
-    if (r.status === 401 && retry) return microsoft(text, from, to, signal, false); // токен протух
-    if (!r.ok) throw new Error('Microsoft: HTTP ' + r.status);
+    let r = await send();
+    if (r.status === 401) { token = await msAuth(route, signal, true); r = await send(); } // токен протух
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { const j = await r.json(); if (j.error && j.error.message) msg += ' ' + j.error.message; } catch {}
+      throw Object.assign(new Error(msg), { http: true });
+    }
     const j = await r.json();
+    msRoute = route;
     const det = j[0].detectedLanguage && j[0].detectedLanguage.language;
     return { text: j[0].translations[0].text, src: det ? (MS_BACK[det] || det) : null, dict: [], engine: 'Microsoft' };
+  }
+
+  async function microsoft(text, from, to, signal) {
+    const order = msRoute ? [msRoute] : ['direct', 'proxy'];
+    const errors = [];
+    for (const route of order) {
+      try { return await msTranslate(route, text, from, to, signal); }
+      catch (e) {
+        if (e.name === 'AbortError') throw e;
+        errors.push((route === 'direct' ? 'напрямую' : 'через прокси') + ': ' + (e.message || 'ошибка сети'));
+        if (e.http) break; // Microsoft ответил ошибкой (например, язык не поддерживается) — второй путь не поможет
+      }
+    }
+    if (msRoute && order.length === 1) msRoute = null; // в следующий раз снова попробуем оба пути
+    msError = errors.join('; ');
+    throw new Error('Microsoft — ' + msError);
   }
 
   async function translateChunk(text, from, to, signal) {
     const engine = document.querySelector('input[name=engine]:checked').value;
     if (engine === 'microsoft') {
+      msError = '';
       try { return await microsoft(text, from, to, signal); }
       catch (e) { if (e.name === 'AbortError') throw e; } // не вышло — пробуем Google
     }
@@ -517,7 +549,7 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
       renderDetected();
       const used = [...new Set(results.map(r => r.engine))].join(' + ');
       const want = document.querySelector('input[name=engine]:checked').value === 'microsoft' ? 'Microsoft' : 'Google';
-      engineNote = used !== want ? used + ' (' + want + ' недоступен)' : used;
+      engineNote = used !== want ? used + ' (' + want + ' недоступен' + (want === 'Microsoft' && msError ? ' — ' + msError : '') + ')' : used;
       renderEngine();
       renderDict(parts.length === 1 ? results[0].dict : []);
       if (save) addHistory({ sl: from === 'auto' ? (lastDetected || 'auto') : from, tl: to, src: text, dst: result });

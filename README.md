@@ -34,3 +34,30 @@
 ```nginx
 add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://translate.googleapis.com https://edge.microsoft.com https://api-edge.cognitive.microsofttranslator.com https://api.mymemory.translated.net; media-src https://translate.google.com data:" always;
 ```
+
+### Прокси для Microsoft
+
+Браузер может не пустить прямые запросы к Microsoft (CORS). Тогда страница
+обращается к `/ms/auth` и `/ms/translate` на своём же домене — добавьте в блок
+`server { listen 443 ... }`:
+
+```nginx
+location = /ms/auth {
+    proxy_pass https://edge.microsoft.com/translate/auth;
+    proxy_ssl_server_name on;
+    proxy_set_header Host edge.microsoft.com;
+    proxy_set_header Origin "";
+    proxy_set_header Referer "";
+    proxy_set_header Cookie "";
+    add_header Cache-Control "no-store" always;
+}
+location = /ms/translate {
+    proxy_pass https://api-edge.cognitive.microsofttranslator.com/translate;
+    proxy_ssl_server_name on;
+    proxy_set_header Host api-edge.cognitive.microsofttranslator.com;
+    proxy_set_header Origin "";
+    proxy_set_header Referer "";
+    proxy_set_header Cookie "";
+    client_max_body_size 64k;
+}
+```
