@@ -101,8 +101,7 @@ select:hover{border-color:var(--ink)}
   background:repeating-linear-gradient(-45deg,transparent 0 8px,color-mix(in srgb,var(--line) 55%,transparent) 8px 9px)}
 .output.has{border-style:solid;background:var(--field)}
 .output.error{color:var(--danger);border-color:var(--danger);font-family:inherit;font-size:14px}
-.dict{font-size:13px;color:var(--muted)}
-#engineNote{text-align:right}
+.dict{font-size:13px;color:var(--muted);margin-top:6px}
 
 .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .btn{border:1.5px solid var(--line);background:var(--field);color:var(--ink);font-family:inherit;font-size:14px;font-weight:600;line-height:1.2;padding:12px 14px;border-radius:10px;cursor:pointer;
@@ -117,14 +116,6 @@ select:hover{border-color:var(--ink)}
 .btn:disabled{opacity:.4;pointer-events:none}
 
 .opts{margin-top:18px;padding-top:18px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;justify-content:space-between}
-.opts-left{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px}
-.seg{display:inline-flex;border:1.5px solid var(--line);border-radius:10px;padding:3px;background:var(--field);gap:2px}
-.seg label{cursor:pointer}
-.seg input{position:absolute;opacity:0;pointer-events:none}
-.seg span{display:block;padding:6px 12px;border-radius:7px;font-size:14px;font-weight:600;color:var(--muted);transition:background .15s,color .15s}
-.seg label:hover span{color:var(--ink)}
-.seg input:checked+span{background:var(--ink);color:var(--bg)}
-.seg input:focus-visible+span{outline:2px solid var(--accent);outline-offset:1px}
 .check{display:flex;align-items:center;gap:8px;font-size:15px;cursor:pointer;user-select:none}
 .check input{accent-color:var(--accent);width:16px;height:16px;margin:0}
 .keys{font-size:13px;color:var(--muted)}
@@ -292,7 +283,7 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
 
       <div class="col dst">
         <div class="output placeholder" id="out" aria-live="polite">Здесь появится перевод</div>
-        <div class="hint"><span class="dict" id="alt"></span><span class="mono" id="engineNote"></span></div>
+        <div class="dict" id="alt"></div>
         <div class="btns">
           <button class="btn primary" id="copy" type="button">Копировать перевод</button>
           <button class="btn" id="speakOut" type="button">Озвучить</button>
@@ -302,13 +293,7 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
     </div>
 
     <div class="opts">
-      <div class="opts-left">
-        <div class="seg" role="radiogroup" aria-label="Сервис перевода">
-          <label><input type="radio" name="engine" value="google" checked><span>Google</span></label>
-          <label><input type="radio" name="engine" value="microsoft"><span>Microsoft</span></label>
-        </div>
-        <label class="check"><input type="checkbox" id="auto" checked> Переводить при вводе</label>
-      </div>
+      <label class="check"><input type="checkbox" id="auto" checked> Переводить при вводе</label>
       <span class="keys"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> — перевести · <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> — поменять языки</span>
     </div>
   </section>
@@ -384,13 +369,6 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
   if (!sl.value) sl.value = 'auto';
   if (params.get('q')) src.value = params.get('q').slice(0, MAX);
 
-  const engines = document.querySelectorAll('input[name=engine]');
-  const savedEngine = store.get('engine', 'google');
-  engines.forEach(r => {
-    r.checked = r.value === savedEngine;
-    r.onchange = () => { store.set('engine', r.value); if (src.value.trim()) translate(false); };
-  });
-
   let auto = store.get('auto', true);
   const renderAuto = () => { autoBtn.checked = auto; };
   renderAuto();
@@ -443,81 +421,15 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
     return { text: j.responseData.translatedText, src: null, dict: [] };
   }
 
-  // Microsoft Translator — тот же бесплатный доступ, что использует браузер Edge:
-  // короткоживущий токен с edge.microsoft.com и запрос к api-edge.cognitive.microsofttranslator.com
-  const MS_CODE = { iw:'he', 'zh-CN':'zh-Hans', 'zh-TW':'zh-Hant', no:'nb', hmn:'mww', sr:'sr-Cyrl', jw:'jv', ny:'nya', st:'st' };
-  const MS_BACK = { he:'iw', 'zh-Hans':'zh-CN', 'zh-Hant':'zh-TW', zh:'zh-CN', nb:'no', mww:'hmn', 'sr-Cyrl':'sr', 'sr-Latn':'sr', jv:'jw', nya:'ny', tl:'fil' };
-  // Два пути: напрямую к Microsoft или через прокси на этом же домене (/ms/…, см. README) —
-  // прямой запрос браузер может не пустить из-за CORS. Рабочий путь запоминается.
-  const MS_ROUTES = {
-    direct: { auth: 'https://edge.microsoft.com/translate/auth', api: 'https://api-edge.cognitive.microsofttranslator.com/translate' },
-    proxy: { auth: '/ms/auth', api: '/ms/translate' }
-  };
-  let msRoute = null, msToken = null, msTokenAt = 0, msError = '';
-
-  async function msAuth(route, signal, force) {
-    if (!force && msToken && msRoute === route && Date.now() - msTokenAt < 8 * 60 * 1000) return msToken;
-    const r = await fetch(MS_ROUTES[route].auth, { signal, cache: 'no-store' });
-    if (!r.ok) throw new Error('токен: HTTP ' + r.status);
-    const t = (await r.text()).trim();
-    if (!/^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(t)) throw new Error('токен: неверный ответ'); // например, прокси не настроен
-    msToken = t; msTokenAt = Date.now();
-    return t;
-  }
-
-  async function msTranslate(route, text, from, to, signal) {
-    let token = await msAuth(route, signal, false);
-    let url = MS_ROUTES[route].api + '?api-version=3.0&to=' + encodeURIComponent(MS_CODE[to] || to);
-    if (from !== 'auto') url += '&from=' + encodeURIComponent(MS_CODE[from] || from);
-    const send = () => fetch(url, {
-      method: 'POST', signal,
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify([{ Text: text }])
-    });
-    let r = await send();
-    if (r.status === 401) { token = await msAuth(route, signal, true); r = await send(); } // токен протух
-    if (!r.ok) {
-      let msg = 'HTTP ' + r.status;
-      try { const j = await r.json(); if (j.error && j.error.message) msg += ' ' + j.error.message; } catch {}
-      throw Object.assign(new Error(msg), { http: true });
-    }
-    const j = await r.json();
-    msRoute = route;
-    const det = j[0].detectedLanguage && j[0].detectedLanguage.language;
-    return { text: j[0].translations[0].text, src: det ? (MS_BACK[det] || det) : null, dict: [], engine: 'Microsoft' };
-  }
-
-  async function microsoft(text, from, to, signal) {
-    const order = msRoute ? [msRoute] : ['direct', 'proxy'];
-    const errors = [];
-    for (const route of order) {
-      try { return await msTranslate(route, text, from, to, signal); }
-      catch (e) {
-        if (e.name === 'AbortError') throw e;
-        errors.push((route === 'direct' ? 'напрямую' : 'через прокси') + ': ' + (e.message || 'ошибка сети'));
-        if (e.http) break; // Microsoft ответил ошибкой (например, язык не поддерживается) — второй путь не поможет
-      }
-    }
-    if (msRoute && order.length === 1) msRoute = null; // в следующий раз снова попробуем оба пути
-    msError = errors.join('; ');
-    throw new Error('Microsoft — ' + msError);
-  }
-
   async function translateChunk(text, from, to, signal) {
-    const engine = document.querySelector('input[name=engine]:checked').value;
-    if (engine === 'microsoft') {
-      msError = '';
-      try { return await microsoft(text, from, to, signal); }
-      catch (e) { if (e.name === 'AbortError') throw e; } // не вышло — пробуем Google
-    }
-    try { return { ...(await google(text, from, to, signal)), engine: 'Google' }; }
+    try { return await google(text, from, to, signal); }
     catch (e) {
       if (e.name === 'AbortError') throw e;
       // Резервный сервис принимает до 500 символов за запрос
       const parts = chunks(text, 480);
       const res = [];
       for (const p of parts) res.push(await mymemory(p, from, to, signal));
-      return { text: res.map(r => r.text).join(''), src: null, dict: [], engine: 'MyMemory' };
+      return { text: res.map(r => r.text).join(''), src: null, dict: [] };
     }
   }
 
@@ -525,7 +437,7 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
     const text = src.value;
     const id = ++reqId;
     if (controller) controller.abort();
-    if (!text.trim()) { showOut(''); detected.textContent = ''; alt.textContent = ''; engineNote = ''; renderEngine(); return; }
+    if (!text.trim()) { showOut(''); detected.textContent = ''; alt.textContent = ''; return; }
 
     controller = new AbortController();
     const signal = controller.signal;
@@ -547,10 +459,6 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
       showOut(result);
       lastDetected = from === 'auto' ? results[0].src : null;
       renderDetected();
-      const used = [...new Set(results.map(r => r.engine))].join(' + ');
-      const want = document.querySelector('input[name=engine]:checked').value === 'microsoft' ? 'Microsoft' : 'Google';
-      engineNote = used !== want ? used + ' (' + want + ' недоступен' + (want === 'Microsoft' && msError ? ' — ' + msError : '') + ')' : used;
-      renderEngine();
       renderDict(parts.length === 1 ? results[0].dict : []);
       if (save) addHistory({ sl: from === 'auto' ? (lastDetected || 'auto') : from, tl: to, src: text, dst: result });
     } catch (e) {
@@ -571,8 +479,6 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
     out.textContent = text || 'Здесь появится перевод';
   }
 
-  let engineNote = '';
-  function renderEngine() { $('engineNote').textContent = engineNote ? 'Перевод: ' + engineNote : ''; }
   function renderDetected() {
     detected.textContent = '';
     if (!lastDetected || !LANGS[lastDetected]) return;
@@ -802,7 +708,7 @@ html:not(.api-blocked) #nojs .msg-api,html.api-blocked #nojs .msg-nojs{display:n
     if (csp) {
       $('apiReason').innerHTML = 'Запросы к <code>translate.googleapis.com</code> запрещает сам сервер — заголовок '
         + '<code>Content-Security-Policy</code>. Администратору нужно добавить в <code>connect-src</code> адреса '
-        + '<code>https://translate.googleapis.com https://edge.microsoft.com https://api-edge.cognitive.microsofttranslator.com https://api.mymemory.translated.net</code>, '
+        + '<code>https://translate.googleapis.com https://api.mymemory.translated.net</code>, '
         + 'а в <code>media-src</code> — <code>https://translate.google.com data:</code>.';
       $('apiTech').textContent = 'Сейчас: ' + csp;
     } else {
